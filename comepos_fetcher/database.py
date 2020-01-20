@@ -78,7 +78,7 @@ class Sensor:
             pass
 
     def refresh(self):
-        self.store.append(self.key, self.fetch_new_data())
+        self.store.append(self.key, self._fetch_new_data())
 
     def get_online_length(self, start=None):
         return self.client.get_variable_history_size(
