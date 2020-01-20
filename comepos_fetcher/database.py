@@ -25,11 +25,18 @@ progress_bar = tqdm
 
 
 def enable_notebook():
+    """setup the tqdm progress bar for a notebook session."""
     global progress_bar
     progress_bar = tqdm_notebook
 
 
-def from_cache_or_fetch(store, key, fetch, *, format="fixed", **kwargs):
+def disable_notebook():
+    """setup the tqdm progress bar for a non-interactive session."""
+    global progress_bar
+    progress_bar = tqdm
+
+
+def _from_cache_or_fetch(store, key, fetch, *, format="fixed", **kwargs):
     try:
         df = store[key]
     except KeyError:
@@ -57,14 +64,53 @@ class Sensor:
     client = attr.ib(repr=False)
     store = attr.ib(repr=False)
 
-    def fetch_data(self):
-        n_values = self.online_length
+    @property
+    def data(self):
+        return self._get_data()
+
+    @property
+    def last_retrieved_value(self):
+        try:
+            return self.store[self.key].sort_index().index[-1]
+        except KeyError:
+            pass
+
+    def refresh(self):
+        self.store.append(self.key, self.fetch_new_data())
+
+    def get_online_length(self, start=None):
+        return self.client.get_variable_history_size(
+            self.building_id, self.service_name, self.variable_name, start
+        )
+
+    @property
+    def online_length(self):
+        return self.client.get_variable_history_size(
+            self.building_id, self.service_name, self.variable_name
+        )
+
+    @property
+    def key(self):
+        return f"/{slugify(self.building_id)}/sensors/{self.slug}"
+
+    def __len__(self):
+        return len(self.data)
+
+    def _fetch_data(self, since=None):
+        f"""Fetch the sensor data.
+
+        If the historic size is more than MAX_LINE_PER_REQUEST ({MAX_LINE_PER_REQUEST})
+        the requested period will be sliced to suit this limit.
+        """
+        n_values = self.get_online_length(start=since)
         if n_values < MAX_LINE_PER_REQUEST:
             return self.client.get_variable_history(
                 self.building_id, self.service_name, self.variable_name
             )
-
-        period_start = self.building_status["first_measurement_date"]
+        if since is not None:
+            period_start = since
+        else:
+            period_start = self.building_status["first_measurement_date"]
         period_end = self.building_status["last_variable_value_changed_date"]
         n_slices = n_values // MAX_LINE_PER_REQUEST + 1
 
@@ -84,54 +130,23 @@ class Sensor:
         ]
         return pd.concat(all_data)
 
-    @property
-    def key(self):
-        return f"/{slugify(self.building_id)}/sensors/{self.slug}"
-
-    @property
-    def last_retrieved_value(self):
-        try:
-            return self.store[self.key].sort_index().index[-1]
-        except KeyError:
-            pass
-
-    @property
-    def data(self):
-        return self.get_data()
-
-    def get_data(self):
-        data = from_cache_or_fetch(
-            store=self.store, key=self.key, fetch=self.fetch_data, format="table",
+    def _get_data(self):
+        data = _from_cache_or_fetch(
+            store=self.store, key=self.key, fetch=self._fetch_data, format="table",
         )
         data = data.rename(columns={"value": self.slug})
         return data
 
-    def __len__(self):
-        return len(self.data)
-
-    def get_online_length(self, start=None, end=None):
-        return self.client.get_variable_history_size(
-            self.building_id, self.service_name, self.variable_name, start, end
-        )
-
-    @property
-    def online_length(self):
-        return self.client.get_variable_history_size(
-            self.building_id, self.service_name, self.variable_name
-        )
-
-    def fetch_new_data(self):
-        new_data = self.fetch_data()
+    def _fetch_new_data(self):
+        new_data = self._fetch_data(self.last_retrieved_value)
+        new_data = new_data.rename(columns={"value": self.slug})
         return new_data
-
-    def refresh(self):
-        self.store.append(self.key, self.fetch_new_data())
 
 
 @attr.s
 class ComeposDB:
     username = attr.ib(type=str)
-    password = attr.ib(type=str)
+    password = attr.ib(type=str, repr=False)
     web_client = attr.ib(init=False, repr=False)
     store_location = attr.ib(type=Path, default=user_data_dir(appname), convert=Path)
     store = attr.ib(init=False, repr=False)
@@ -185,7 +200,7 @@ class BuildingDB:
 
     @building_info.default
     def _building_info_init(self):
-        building_info = from_cache_or_fetch(
+        building_info = _from_cache_or_fetch(
             store=self.store,
             key=f"/{slugify(self.building_id)}/building_info",
             fetch=lambda: self.web_client.buildings.loc[self.building_id],
@@ -199,7 +214,7 @@ class BuildingDB:
 
     @sensors_info.default
     def _sensors_info_init(self):
-        sensors_info = from_cache_or_fetch(
+        sensors_info = _from_cache_or_fetch(
             store=self.store,
             key=f"/{slugify(self.building_id)}/sensors_info",
             fetch=lambda: self.web_client.get_sensor_list(self.building_id),
