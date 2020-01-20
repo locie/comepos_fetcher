@@ -7,24 +7,36 @@ from path import Path
 from appdirs import user_data_dir
 import pandas as pd
 from slugify import slugify
-from warnings import catch_warnings, filterwarnings
+from warnings import catch_warnings, filterwarnings, warn
 from pandas.io.pytables import PerformanceWarning
+from box import Box
+from tqdm import tqdm, tqdm_notebook
 
-from .utils import dotdict
 from .io import VestaWebClient
+from .utils import window
+
+MAX_LINE_PER_REQUEST = 100000
 
 appname = "comepos_fetcher"
 slugify = partial(slugify, separator="_")
 
 
-def from_cache_or_fetch(store, key, fetch):
+progress_bar = tqdm
+
+
+def enable_notebook():
+    global progress_bar
+    progress_bar = tqdm_notebook
+
+
+def from_cache_or_fetch(store, key, fetch, *, format="fixed", **kwargs):
     try:
         df = store[key]
     except KeyError:
-        df = fetch()
+        df = fetch(**kwargs)
         with catch_warnings():
             filterwarnings("ignore", category=PerformanceWarning)
-            store[key] = df
+            store.put(key, df, format=format)
     return df
 
 
@@ -37,32 +49,83 @@ class Sensor:
     service_name = attr.ib()
     variable_name = attr.ib()
     unique_id = attr.ib(repr=False)
-    date = attr.ib(repr=False)
-    value = attr.ib(repr=False)
     unit = attr.ib(repr=False)
     historics = attr.ib(type=bool, convert=bool, repr=False)
     slug = attr.ib(repr=False)
     building_id = attr.ib(repr=False)
+    building_status = attr.ib(repr=False)
     client = attr.ib(repr=False)
     store = attr.ib(repr=False)
 
+    def fetch_data(self):
+        n_values = self.online_length
+        if n_values < MAX_LINE_PER_REQUEST:
+            return self.client.get_variable_history(
+                self.building_id, self.service_name, self.variable_name
+            )
+
+        period_start = self.building_status["first_measurement_date"]
+        period_end = self.building_status["last_variable_value_changed_date"]
+        n_slices = n_values // MAX_LINE_PER_REQUEST + 1
+
+        date_range = pd.date_range(start=period_start, end=period_end, periods=n_slices)
+
+        all_data = [
+            self.client.get_variable_history(
+                self.building_id,
+                self.service_name,
+                self.variable_name,
+                slice_start,
+                slice_end,
+            )
+            for slice_start, slice_end in progress_bar(
+                window(date_range), total=n_slices - 1, desc=self.slug,
+            )
+        ]
+        return pd.concat(all_data)
+
+    @property
+    def key(self):
+        return f"/{slugify(self.building_id)}/sensors/{self.slug}"
+
+    @property
+    def last_retrieved_value(self):
+        try:
+            return self.store[self.key].sort_index().index[-1]
+        except KeyError:
+            pass
+
     @property
     def data(self):
+        return self.get_data()
+
+    def get_data(self):
         data = from_cache_or_fetch(
-            store=self.store,
-            key=f"/{slugify(self.building_id)}/sensors/{self.slug}",
-            fetch=lambda: self.client.get_variable_history(
-                self.building_id, self.service_name, self.variable_name
-            ),
-        )["value"]
-        data.name = self.slug
+            store=self.store, key=self.key, fetch=self.fetch_data, format="table",
+        )
+        data = data.rename(columns={"value": self.slug})
         return data
+
+    def __len__(self):
+        return len(self.data)
+
+    def get_online_length(self, start=None, end=None):
+        return self.client.get_variable_history_size(
+            self.building_id, self.service_name, self.variable_name, start, end
+        )
 
     @property
     def online_length(self):
         return self.client.get_variable_history_size(
             self.building_id, self.service_name, self.variable_name
         )
+
+    def fetch_new_data(self):
+        new_data = self.fetch_data()
+        return new_data
+
+    def refresh(self):
+        self.store.append(self.key, self.fetch_new_data())
 
 
 @attr.s
@@ -101,26 +164,27 @@ class ComeposDB:
 @attr.s
 class BuildingDB:
     username = attr.ib(type=str)
-    password = attr.ib(type=str)
+    password = attr.ib(type=str, repr=False)
     building_id = attr.ib(type=str)
     web_client = attr.ib(init=False, repr=False)
     store_location = attr.ib(type=Path, default=user_data_dir(appname), convert=Path)
     store = attr.ib(init=False, repr=False)
     building_info = attr.ib(init=False, repr=False)
+    building_status = attr.ib(init=False, repr=False)
     sensors_info = attr.ib(init=False, repr=False)
     sensors = attr.ib(init=False, repr=False)
 
     @web_client.default
-    def client_init(self):
+    def _client_init(self):
         return VestaWebClient(self.username, self.password)
 
     @store.default
-    def store_init(self):
+    def _store_init(self):
         self.store_location.makedirs_p()
         return pd.HDFStore(self.store_location / "store.h5")
 
     @building_info.default
-    def building_info_init(self):
+    def _building_info_init(self):
         building_info = from_cache_or_fetch(
             store=self.store,
             key=f"/{slugify(self.building_id)}/building_info",
@@ -128,8 +192,13 @@ class BuildingDB:
         )
         return building_info
 
+    @building_status.default
+    def _building_status_init(self):
+        building_status = self.web_client.get_building_status(self.building_id)
+        return building_status
+
     @sensors_info.default
-    def sensors_info_init(self):
+    def _sensors_info_init(self):
         sensors_info = from_cache_or_fetch(
             store=self.store,
             key=f"/{slugify(self.building_id)}/sensors_info",
@@ -139,13 +208,14 @@ class BuildingDB:
         return sensors_info
 
     @sensors.default
-    def sensors_init(self):
+    def _sensors_init(self):
         for sensor_id, sensor in self.sensors_info.iterrows():
-            sensors = dotdict(
+            sensors = Box(
                 {
                     sensor.slug: Sensor(
                         **sensor,
                         building_id=self.building_id,
+                        building_status=self.building_status,
                         client=self.web_client,
                         store=self.store,
                     )
@@ -153,6 +223,18 @@ class BuildingDB:
                 }
             )
         return sensors
+
+    def refresh_all_sensors(self):
+        try:
+            for sensor in progress_bar(
+                self.sensors.values(), desc="fetch data for all sensors"
+            ):
+                sensor.refresh()
+        except KeyboardInterrupt:
+            warn("User interruption. Some data have not been updated.")
+
+    def sensors_data(self):
+        return {sensor.slug: sensor.data for sensor in self.sensors.values()}
 
     def clean(self):
         self.store.remove(f"/{slugify(self.building_id)}")

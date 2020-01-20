@@ -8,6 +8,7 @@ from uplink import Consumer, get, returns, Query, retry
 import json
 from pandas import read_json, DataFrame
 from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from .utils import ensure_camel_columns, _shared_cachemethod_meta, _infer_datetime
 
@@ -19,14 +20,29 @@ class VestaWebClient(Consumer):
         super(VestaWebClient, self).__init__(base_url=self.base_url)
         self.username = username
         self.password = password
-        self.session.params["token"] = self._get_token()
+        self._get_token()
+        # after some time, the session end : this allow to request another token after
+        # some time.
+        self._scheduler = BackgroundScheduler()
+        self._scheduler.add_job(self._get_token, "interval", minutes=30)
+        self._scheduler.start()
+
+        # data that do not change often are put in a cache to speed up the requests.
         self.cache_meta = {}
 
     def _get_token(self) -> str:
         url = urljoin(self.base_url, "login.php")
         parameters = dict(login=self.username, password=self.password)
         response = requests.get(url=url, params=parameters)
-        return response.text
+        self.session.params["token"] = response.text
+
+    def __del__(self):
+        self.logout()
+        self._scheduler.shutdown()
+
+    @property
+    def token(self):
+        return self.session.params["token"]
 
     @property
     @_shared_cachemethod_meta(key="buildings")
@@ -56,9 +72,27 @@ class VestaWebClient(Consumer):
             return ensure_camel_columns(read_json(json.dumps(raw)).set_index("id"))
         raise IOError("Empty response from web request.")
 
-    @_shared_cachemethod_meta(key="sensor_list")
+    def get_building_status(self, building_id: str) -> DataFrame:
+        """Get the building status (the date for the first / last acquisition
+        and for the last parameter change)
+
+        Arguments:
+            building_id {str} -- id of the req. building (see client.buildings).
+
+        Returns:
+            DataFrame -- building status
+        """
+        raw = self._get_status(building_id)
+        if raw:
+            time_info = {
+                key: datetime.fromtimestamp(int(value) / 1000)
+                for key, value in raw[0].items()
+            }
+            return ensure_camel_columns(time_info)
+        raise IOError("Empty response from web request.")
+
     def get_sensor_list(self, building_id: str) -> DataFrame:
-        """[summary]
+        """Get the list of the available sensors avalaible in a building.
 
         Arguments:
             building_id {str} -- id of the req. building (see client.buildings).
@@ -67,11 +101,12 @@ class VestaWebClient(Consumer):
             DataFrame -- The sensors available for the building id.
         """
         raw = self._get_sensor_list(building_id)
-        if raw:
-            return ensure_camel_columns(read_json(json.dumps(raw)).set_index("id"))
-        raise IOError("Empty response from web request.")
+        if not raw:
+            raise IOError("Empty response from web request.")
+        df = ensure_camel_columns(read_json(json.dumps(raw)).set_index("id"))
+        df = df.drop(["date", "value"], axis=1)
+        return df
 
-    @_shared_cachemethod_meta(key="variable_history")
     def get_variable_history(
         self,
         building_id: str,
@@ -80,7 +115,7 @@ class VestaWebClient(Consumer):
         start: datetime = None,
         end: datetime = None,
     ) -> DataFrame:
-        """[summary]
+        """ Get the sensor data historic.
 
         Arguments:
             building_id {str} -- id of the req. building (see client.buildings).
@@ -103,19 +138,15 @@ class VestaWebClient(Consumer):
                 building_id, service_name, variable_name, start, end
             )
             if raw:
-                df = read_json(json.dumps(raw)).set_index("date")
+                df = read_json(json.dumps(raw), dtype=float).set_index("date")
             else:
                 raise IOError("Empty response from web request.")
-        except json.JSONDecodeError:
-            df = DataFrame(columns=["value"])
+        except (json.JSONDecodeError, KeyError, IOError):
+            df = DataFrame(columns=["value"], dtype=float)
             df.index.name = "date"
-            return df
-        except KeyError:
-            df = DataFrame(columns=["value"])
-            df.index.name = "date"
+
         return df
 
-    @_shared_cachemethod_meta(key="variable_history_size")
     def get_variable_history_size(
         self,
         building_id: str,
@@ -124,7 +155,7 @@ class VestaWebClient(Consumer):
         start: datetime = None,
         end: datetime = None,
     ) -> int:
-        """[summary]
+        """Get the sensor data historic size.
 
         Arguments:
             building_id {str} -- id of the req. building (see client.buildings).
@@ -146,10 +177,20 @@ class VestaWebClient(Consumer):
             building_id, service_name, variable_name, start, end
         )
 
+    @get("logout.php")
+    def logout(self):
+        pass
+
     @returns.json
     @retry(max_attempts=3)
     @get("getBuildingList.php")
     def _get_buildings(self):
+        pass
+
+    @returns.json
+    @retry(max_attempts=3)
+    @get("getStatus.php")
+    def _get_status(self, building_id: Query("building")):
         pass
 
     @returns.json
