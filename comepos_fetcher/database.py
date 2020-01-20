@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 # coding=utf-8
 
-import attr
 from functools import partial
-from path import Path
-from appdirs import user_data_dir
-import pandas as pd
-from slugify import slugify
 from warnings import catch_warnings, filterwarnings, warn
+
+import attr
+import pandas as pd
+from appdirs import user_data_dir
 from pandas.io.pytables import PerformanceWarning
-from box import Box
+from path import Path
+from slugify import slugify
 from tqdm import tqdm, tqdm_notebook
+
+from box import Box
 
 from .io import VestaWebClient
 from .utils import window

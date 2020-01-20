@@ -1,11 +1,13 @@
-import pendulum
+import re
+from datetime import datetime
+from functools import partial
+from itertools import islice
+
 from cachetools import cachedmethod
 from cachetools.keys import hashkey
-import re
-from functools import partial
-from datetime import datetime
 from pandas import DataFrame
-from itertools import islice
+
+import pendulum
 
 
 def window(seq, n=2):

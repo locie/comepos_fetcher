@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 # coding=utf-8
 
-import requests
-
-from urllib.parse import urljoin
-from uplink import Consumer, get, returns, Query, retry
 import json
-from pandas import read_json, DataFrame
 from datetime import datetime
-from apscheduler.schedulers.background import BackgroundScheduler
+from urllib.parse import urljoin
 
-from .utils import ensure_camel_columns, _shared_cachemethod_meta, _infer_datetime
+import requests
+from apscheduler.schedulers.background import BackgroundScheduler
+from pandas import DataFrame, read_json
+
+from uplink import Consumer, Query, get, retry, returns
+
+from .utils import _infer_datetime, _shared_cachemethod_meta, ensure_camel_columns
 
 
 class VestaWebClient(Consumer):
