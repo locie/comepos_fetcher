@@ -78,7 +78,10 @@ class Sensor:
             pass
 
     def refresh(self):
-        self.store.append(self.key, self._fetch_new_data())
+        if self.key in self.store.keys():
+            self.store.append(self.key, self._fetch_new_data())
+        else:
+            self._get_data()
 
     def get_online_length(self, start=None):
         return self.client.get_variable_history_size(
@@ -104,20 +107,25 @@ class Sensor:
         If the historic size is more than MAX_LINE_PER_REQUEST ({MAX_LINE_PER_REQUEST})
         the requested period will be sliced to suit this limit.
         """
-        n_values = self.get_online_length(start=since)
-        if n_values < MAX_LINE_PER_REQUEST:
-            return self.client.get_variable_history(
-                self.building_id, self.service_name, self.variable_name
-            )
         if since is not None:
             period_start = since
         else:
             period_start = self.building_status["first_measurement_date"]
         period_end = self.building_status["last_variable_value_changed_date"]
+
+        n_values = self.get_online_length(start=period_start)
+        if n_values < MAX_LINE_PER_REQUEST:
+            return self.client.get_variable_history(
+                self.building_id,
+                self.service_name,
+                self.variable_name,
+                start=period_start,
+                end=period_end,
+            )
+
         n_slices = n_values // MAX_LINE_PER_REQUEST + 1
 
         date_range = pd.date_range(start=period_start, end=period_end, periods=n_slices)
-
         all_data = [
             self.client.get_variable_history(
                 self.building_id,
@@ -141,7 +149,6 @@ class Sensor:
 
     def _fetch_new_data(self):
         new_data = self._fetch_data(self.last_retrieved_value)
-        new_data = new_data.rename(columns={"value": self.slug})
         return new_data
 
 
