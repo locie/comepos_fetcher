@@ -10,7 +10,7 @@ from appdirs import user_data_dir
 from pandas.io.pytables import PerformanceWarning
 from path import Path
 from slugify import slugify
-from tqdm import tqdm, tqdm_notebook
+from tqdm.auto import tqdm
 
 from box import Box
 
@@ -21,21 +21,6 @@ MAX_LINE_PER_REQUEST = 100000
 
 appname = "comepos_fetcher"
 slugify = partial(slugify, separator="_")
-
-
-progress_bar = tqdm
-
-
-def enable_notebook():
-    """setup the tqdm progress bar for a notebook session."""
-    global progress_bar
-    progress_bar = tqdm_notebook
-
-
-def disable_notebook():
-    """setup the tqdm progress bar for a non-interactive session."""
-    global progress_bar
-    progress_bar = tqdm
 
 
 def _from_cache_or_fetch(store, key, fetch, *, format="fixed", **kwargs):
@@ -59,7 +44,7 @@ class Sensor:
     variable_name = attr.ib()
     unique_id = attr.ib(repr=False)
     unit = attr.ib(repr=False)
-    historics = attr.ib(type=bool, convert=bool, repr=False)
+    historics = attr.ib(type=bool, converter=bool, repr=False)
     slug = attr.ib(repr=False)
     building_id = attr.ib(repr=False)
     building_status = attr.ib(repr=False)
@@ -134,7 +119,7 @@ class Sensor:
                 slice_start,
                 slice_end,
             )
-            for slice_start, slice_end in progress_bar(
+            for slice_start, slice_end in tqdm(
                 window(date_range), total=n_slices - 1, desc=self.slug,
             )
         ]
@@ -157,7 +142,7 @@ class ComeposDB:
     username = attr.ib(type=str)
     password = attr.ib(type=str, repr=False)
     web_client = attr.ib(init=False, repr=False)
-    store_location = attr.ib(type=Path, default=user_data_dir(appname), convert=Path)
+    store_location = attr.ib(type=Path, default=user_data_dir(appname), converter=Path)
     store = attr.ib(init=False, repr=False)
 
     @web_client.default
@@ -191,7 +176,7 @@ class BuildingDB:
     password = attr.ib(type=str, repr=False)
     building_id = attr.ib(type=str)
     web_client = attr.ib(init=False, repr=False)
-    store_location = attr.ib(type=Path, default=user_data_dir(appname), convert=Path)
+    store_location = attr.ib(type=Path, default=user_data_dir(appname), converter=Path)
     store = attr.ib(init=False, repr=False)
     building_info = attr.ib(init=False, repr=False)
     building_status = attr.ib(init=False, repr=False)
@@ -250,7 +235,7 @@ class BuildingDB:
 
     def refresh_all_sensors(self):
         try:
-            for sensor in progress_bar(
+            for sensor in tqdm(
                 self.sensors.values(), desc="fetch data for all sensors"
             ):
                 sensor.refresh()
