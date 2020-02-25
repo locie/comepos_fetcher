@@ -47,9 +47,13 @@ class Sensor:
     historics = attr.ib(type=bool, converter=bool, repr=False)
     slug = attr.ib(repr=False)
     building_id = attr.ib(repr=False)
-    building_status = attr.ib(repr=False)
     client = attr.ib(repr=False)
-    store = attr.ib(repr=False)
+    store_location = attr.ib(repr=False)
+
+    @property
+    def store(self):
+        self.store_location.makedirs_p()
+        return pd.HDFStore(self.store_location / "store.h5")
 
     @property
     def data(self):
@@ -58,13 +62,16 @@ class Sensor:
     @property
     def last_retrieved_value(self):
         try:
-            return self.store[self.key].sort_index().index[-1]
+            with self.store as store:
+                return store[self.key].sort_index().index[-1]
         except KeyError:
             pass
 
     def refresh(self):
         if self.key in self.store.keys():
-            self.store.append(self.key, self._fetch_new_data())
+            new_data = self._fetch_new_data()
+            with self.store as store:
+                store.append(self.key, new_data)
         else:
             self._get_data()
 
@@ -72,6 +79,10 @@ class Sensor:
         return self.client.get_variable_history_size(
             self.building_id, self.service_name, self.variable_name, start
         )
+
+    @property
+    def building_status(self):
+        return self.client.get_building_status(self.building_id)
 
     @property
     def online_length(self):
@@ -97,16 +108,15 @@ class Sensor:
         else:
             period_start = self.building_status["first_measurement_date"]
         period_end = self.building_status["last_variable_value_changed_date"]
-
         n_values = self.get_online_length(start=period_start)
         if n_values < MAX_LINE_PER_REQUEST:
-            return self.client.get_variable_history(
+            new_data = self.client.get_variable_history(
                 self.building_id,
                 self.service_name,
                 self.variable_name,
                 start=period_start,
-                end=period_end,
             )
+            return new_data
 
         n_slices = n_values // MAX_LINE_PER_REQUEST + 1
 
@@ -126,14 +136,15 @@ class Sensor:
         return pd.concat(all_data)
 
     def _get_data(self):
-        data = _from_cache_or_fetch(
-            store=self.store, key=self.key, fetch=self._fetch_data, format="table",
-        )
+        with self.store as store:
+            data = _from_cache_or_fetch(
+                store=store, key=self.key, fetch=self._fetch_data, format="table",
+            )
         data = data.rename(columns={"value": self.slug})
         return data
 
     def _fetch_new_data(self):
-        new_data = self._fetch_data(self.last_retrieved_value)
+        new_data = self._fetch_data(self.last_retrieved_value + pd.Timedelta(1, "s"))
         return new_data
 
 
@@ -177,9 +188,7 @@ class BuildingDB:
     building_id = attr.ib(type=str)
     web_client = attr.ib(init=False, repr=False)
     store_location = attr.ib(type=Path, default=user_data_dir(appname), converter=Path)
-    store = attr.ib(init=False, repr=False)
     building_info = attr.ib(init=False, repr=False)
-    building_status = attr.ib(init=False, repr=False)
     sensors_info = attr.ib(init=False, repr=False)
     sensors = attr.ib(init=False, repr=False)
 
@@ -187,32 +196,34 @@ class BuildingDB:
     def _client_init(self):
         return VestaWebClient(self.username, self.password)
 
-    @store.default
-    def _store_init(self):
+    @property
+    def store(self):
         self.store_location.makedirs_p()
         return pd.HDFStore(self.store_location / "store.h5")
 
-    @building_info.default
-    def _building_info_init(self):
-        building_info = _from_cache_or_fetch(
-            store=self.store,
-            key=f"/{slugify(self.building_id)}/building_info",
-            fetch=lambda: self.web_client.buildings.loc[self.building_id],
-        )
-        return building_info
-
-    @building_status.default
-    def _building_status_init(self):
+    @property
+    def building_status(self):
         building_status = self.web_client.get_building_status(self.building_id)
         return building_status
 
+    @building_info.default
+    def _building_info_init(self):
+        with self.store as store:
+            building_info = _from_cache_or_fetch(
+                store=store,
+                key=f"/{slugify(self.building_id)}/building_info",
+                fetch=lambda: self.web_client.buildings.loc[self.building_id],
+            )
+            return building_info
+
     @sensors_info.default
     def _sensors_info_init(self):
-        sensors_info = _from_cache_or_fetch(
-            store=self.store,
-            key=f"/{slugify(self.building_id)}/sensors_info",
-            fetch=lambda: self.web_client.get_sensor_list(self.building_id),
-        )
+        with self.store as store:
+            sensors_info = _from_cache_or_fetch(
+                store=store,
+                key=f"/{slugify(self.building_id)}/sensors_info",
+                fetch=lambda: self.web_client.get_sensor_list(self.building_id),
+            )
         sensors_info["slug"] = sensors_info.unique_id.apply(slugify)
         return sensors_info
 
@@ -224,9 +235,8 @@ class BuildingDB:
                     sensor.slug: Sensor(
                         **sensor,
                         building_id=self.building_id,
-                        building_status=self.building_status,
                         client=self.web_client,
-                        store=self.store,
+                        store_location=self.store_location,
                     )
                     for _, sensor in self.sensors_info.iterrows()
                 }
@@ -246,4 +256,5 @@ class BuildingDB:
         return {sensor.slug: sensor.data for sensor in self.sensors.values()}
 
     def clean(self):
-        self.store.remove(f"/{slugify(self.building_id)}")
+        with self.store as store:
+            store.remove(f"/{slugify(self.building_id)}")

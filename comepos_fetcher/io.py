@@ -139,7 +139,10 @@ class VestaWebClient(Consumer):
                 building_id, service_name, variable_name, start, end
             )
             if raw:
-                df = read_json(json.dumps(raw), dtype=float).set_index("date")
+                df = read_json(
+                    json.dumps(raw), dtype=float, convert_dates=False
+                ).set_index("date")
+                df.index = map(datetime.fromtimestamp, df.index / 1000)
             else:
                 raise IOError("Empty response from web request.")
         except (json.JSONDecodeError, KeyError, IOError):

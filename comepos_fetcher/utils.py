@@ -33,9 +33,9 @@ def _shared_cachemethod_meta(key):
 
 def _infer_datetime(dt):
     if isinstance(dt, datetime):
-        return int(dt.timestamp() * 1000)
+        return int(dt.timestamp() * 1000) - 3600 * 1000
     if isinstance(dt, str):
-        return int(pendulum.parse(dt).timestamp() * 1000)
+        return int(pendulum.parse(dt).timestamp() * 1000) - 3600 * 1000
     return dt
 
 
