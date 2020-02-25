@@ -235,11 +235,7 @@ class ComeposDB:
         self, export_dir="./export_comepos_db", start=None, end=None, overwrite=False
     ):
         export_db(
-            self,
-            export_dir="./export_comepos_db",
-            start=None,
-            end=None,
-            overwrite=False,
+            self, export_dir=export_dir, start=start, end=end, overwrite=overwrite,
         )
 
 
@@ -326,9 +322,5 @@ class BuildingDB:
         self, export_dir="./export_comepos_db", start=None, end=None, overwrite=False
     ):
         export_db(
-            self,
-            export_dir="./export_comepos_db",
-            start=None,
-            end=None,
-            overwrite=False,
+            self, export_dir=export_dir, start=start, end=end, overwrite=overwrite,
         )
