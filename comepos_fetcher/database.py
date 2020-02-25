@@ -11,6 +11,7 @@ from pandas.io.pytables import PerformanceWarning
 from path import Path
 from slugify import slugify
 from tqdm.auto import tqdm
+from functools import wraps
 
 from box import Box
 
@@ -32,6 +33,56 @@ def _from_cache_or_fetch(store, key, fetch, *, format="fixed", **kwargs):
             filterwarnings("ignore", category=PerformanceWarning)
             store.put(key, df, format=format)
     return df
+
+
+def export_db(
+    db, export_dir="./export_comepos_db", start=None, end=None, overwrite=False
+):
+    """Export the database in a folder containing csv files.
+
+    The folder follow the hierarchy of the underlying HDFStore, and the tree
+    look like:
+
+    {export_dir}
+    └── {building_id}
+        ├── building_info.csv
+        ├── sensors
+        │   └── {service_name}_{variable_name}.csv
+        └── sensors_info.csv
+
+    Arguments:
+        db {Union[ComeposDB, BuildingDB]} -- The database to export
+
+    Keyword Arguments:
+        export_dir {str} -- the exported folder. Should not exists and will be created
+            (default: {"./export_comepos_db"})
+        start {any pandas date format} -- start of the exported period
+            (default: {None})
+        end {any pandas date format} -- end of the exported period (default: {None})
+        overwrite {bool} -- if True, overwrite the export_dir. **USE WITH CAUTION**
+            (default: {False})
+
+    Raises:
+        FileExistsError: [description]
+    """
+    export_dir = Path(export_dir)
+    if overwrite:
+        export_dir.rmtree_p()
+    try:
+        export_dir.mkdir()
+    except FileExistsError:
+        raise FileExistsError(
+            "Export dir should not exists. Use overwrite=True to erase the "
+            "actual directory. USE WITH CAUTION !"
+        )
+
+    for key in db.store.keys():
+        file = export_dir / f"{key.strip('/')}.csv"
+        file.dirname().makedirs_p()
+        df = db.store[key]
+        if "sensors/" in key:
+            df = df.loc[start:end]
+        df.to_csv(file)
 
 
 @attr.s
@@ -154,16 +205,15 @@ class ComeposDB:
     password = attr.ib(type=str, repr=False)
     web_client = attr.ib(init=False, repr=False)
     store_location = attr.ib(type=Path, default=user_data_dir(appname), converter=Path)
-    store = attr.ib(init=False, repr=False)
+
+    @property
+    def store(self):
+        self.store_location.makedirs_p()
+        return pd.HDFStore(self.store_location / "store.h5")
 
     @web_client.default
     def client_init(self):
         return VestaWebClient(self.username, self.password)
-
-    @store.default
-    def store_init(self):
-        self.store_location.makedirs_p()
-        return pd.HDFStore(self.store_location / "store.h5")
 
     @property
     def buildings(self):
@@ -179,6 +229,18 @@ class ComeposDB:
 
     def clean(self):
         self.store.filename.remove()
+
+    @wraps(export_db)
+    def export(
+        self, export_dir="./export_comepos_db", start=None, end=None, overwrite=False
+    ):
+        export_db(
+            self,
+            export_dir="./export_comepos_db",
+            start=None,
+            end=None,
+            overwrite=False,
+        )
 
 
 @attr.s
@@ -258,3 +320,15 @@ class BuildingDB:
     def clean(self):
         with self.store as store:
             store.remove(f"/{slugify(self.building_id)}")
+
+    @wraps(export_db)
+    def export(
+        self, export_dir="./export_comepos_db", start=None, end=None, overwrite=False
+    ):
+        export_db(
+            self,
+            export_dir="./export_comepos_db",
+            start=None,
+            end=None,
+            overwrite=False,
+        )
