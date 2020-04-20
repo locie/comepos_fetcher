@@ -18,7 +18,7 @@ from box import Box
 from .io import VestaWebClient
 from .utils import window
 
-MAX_LINE_PER_REQUEST = 100000
+FREQ_FETCH = "1M"
 
 appname = "comepos_fetcher"
 slugify = partial(slugify, separator="_")
@@ -127,8 +127,24 @@ class Sensor:
             self._get_data()
 
     def get_online_length(self, start=None):
-        return self.client.get_variable_history_size(
-            self.building_id, self.service_name, self.variable_name, start
+        if start is not None:
+            period_start = start
+        else:
+            period_start = self.building_status["first_measurement_date"]
+        period_end = self.building_status["last_variable_value_changed_date"]
+
+        date_range = pd.date_range(start=period_start, end=period_end, freq=FREQ_FETCH)
+        return sum(
+            [
+                self.client.get_variable_history(
+                    self.building_id,
+                    self.service_name,
+                    self.variable_name,
+                    slice_start,
+                    slice_end,
+                )
+                for slice_start, slice_end in window(date_range)
+            ]
         )
 
     @property
@@ -137,9 +153,7 @@ class Sensor:
 
     @property
     def online_length(self):
-        return self.client.get_variable_history_size(
-            self.building_id, self.service_name, self.variable_name
-        )
+        return self.get_online_length()
 
     @property
     def key(self):
@@ -159,19 +173,8 @@ class Sensor:
         else:
             period_start = self.building_status["first_measurement_date"]
         period_end = self.building_status["last_variable_value_changed_date"]
-        n_values = self.get_online_length(start=period_start)
-        if n_values < MAX_LINE_PER_REQUEST:
-            new_data = self.client.get_variable_history(
-                self.building_id,
-                self.service_name,
-                self.variable_name,
-                start=period_start,
-            )
-            return new_data
 
-        n_slices = n_values // MAX_LINE_PER_REQUEST + 1
-
-        date_range = pd.date_range(start=period_start, end=period_end, periods=n_slices)
+        date_range = pd.date_range(start=period_start, end=period_end, freq="6M")
         all_data = [
             self.client.get_variable_history(
                 self.building_id,
@@ -181,7 +184,7 @@ class Sensor:
                 slice_end,
             )
             for slice_start, slice_end in tqdm(
-                window(date_range), total=n_slices - 1, desc=self.slug,
+                window(date_range), total=len(date_range), desc=self.slug,
             )
         ]
         return pd.concat(all_data)
